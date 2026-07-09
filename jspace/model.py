@@ -1,0 +1,153 @@
+"""Model wrapper that exposes the residual stream and a differentiable
+'rest-of-network' function, so we can compute Jacobian-lens readouts.
+
+The heavy lifting for the lens itself lives in ``lens.py``; this module is only
+responsible for (a) loading a HF causal-LM onto the GPU, (b) running a forward
+pass whose intermediate residual-stream tensors are retained in the autograd
+graph, and (c) exposing the final RMSNorm + unembedding so a readout can be
+projected into vocabulary space.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Where the user's models already live.
+HF_HUB = os.path.expanduser("~/.cache/huggingface/hub")
+
+
+def resolve_local_model(model_id: str) -> str:
+    """Turn 'Qwen/Qwen3-1.7B-Base' into the local snapshot dir if it is cached,
+    otherwise return the id unchanged (letting HF download / resolve it)."""
+    if os.path.isdir(model_id):
+        return model_id
+    cache_name = "models--" + model_id.replace("/", "--")
+    snap_glob = os.path.join(HF_HUB, cache_name, "snapshots", "*")
+    snaps = sorted(glob.glob(snap_glob))
+    for snap in snaps:
+        if os.path.exists(os.path.join(snap, "config.json")):
+            return snap
+    return model_id
+
+
+@dataclass
+class ForwardCache:
+    """Tensors captured from a single forward pass, kept in the autograd graph."""
+
+    input_ids: torch.Tensor                # [B, T]
+    inputs_embeds: torch.Tensor            # [B, T, d]  (leaf, requires_grad)
+    residuals: list[torch.Tensor]          # residuals[i] = output of layer i (pre-norm)
+    final_resid: torch.Tensor              # input to the final RMSNorm (pre-norm)
+    logits: torch.Tensor                   # [B, T, V]  model's own next-token logits
+    tokens: list[str] = field(default_factory=list)
+
+
+class LensModel:
+    def __init__(self, model_id: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16):
+        self.model_id = model_id
+        local = resolve_local_model(model_id)
+        self.tokenizer = AutoTokenizer.from_pretrained(local)
+        # 'eager' attention is plain matmul+softmax, which (unlike SDPA/flash)
+        # supports the double-backward we use to form Jacobian-vector products.
+        self.model = AutoModelForCausalLM.from_pretrained(
+            local, torch_dtype=dtype, low_cpu_mem_usage=True,
+            attn_implementation="eager",
+        ).to(device).eval()
+        # We never need gradients w.r.t. weights; only w.r.t. activations.
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+
+        self.device = device
+        self.dtype = dtype
+
+        # Locate the standard submodules. Works for Qwen3 / Llama-style models.
+        self.inner = self.model.model
+        self.layers = self.inner.layers
+        self.n_layers = len(self.layers)
+        self.norm = self.inner.norm
+        self.embed = self.inner.get_input_embeddings() if hasattr(self.inner, "get_input_embeddings") else self.inner.embed_tokens
+        self.lm_head = self.model.get_output_embeddings()
+
+        cfg = self.model.config
+        self.d_model = getattr(cfg, "hidden_size", None) or cfg.text_config.hidden_size
+        self.vocab_size = self.lm_head.weight.shape[0]
+
+    # ------------------------------------------------------------------ utils
+    def tokenize(self, text: str) -> torch.Tensor:
+        return self.tokenizer(text, return_tensors="pt").input_ids.to(self.device)
+
+    def token_strings(self, input_ids: torch.Tensor) -> list[str]:
+        ids = input_ids[0].tolist()
+        return [self.tokenizer.decode([i]) for i in ids]
+
+    def decode_top(self, logits_row: torch.Tensor, k: int = 1):
+        """logits_row: [V] -> list of (token_str, prob)."""
+        probs = torch.softmax(logits_row.float(), dim=-1)
+        top = torch.topk(probs, k)
+        out = []
+        for p, idx in zip(top.values.tolist(), top.indices.tolist()):
+            out.append((self.tokenizer.decode([idx]), float(p), int(idx)))
+        return out
+
+    # --------------------------------------------------------------- forward
+    def forward_with_graph(self, input_ids: torch.Tensor, batch: int = 1) -> ForwardCache:
+        """Run a forward pass that keeps every layer's residual output in the
+        autograd graph. ``batch`` replicates the sequence so we can inject a
+        different tangent per position in one shot.
+
+        Uses forward hooks (version-robust) to grab: (1) each decoder layer's
+        output residual, (2) the input to the final norm (the pre-norm final
+        residual we differentiate through).
+        """
+        if batch > 1:
+            input_ids = input_ids.expand(batch, -1).contiguous()
+
+        inputs_embeds = self.embed(input_ids).detach().clone().requires_grad_(True)
+
+        residuals: list[Optional[torch.Tensor]] = [None] * self.n_layers
+        norm_input: dict[str, torch.Tensor] = {}
+
+        handles = []
+
+        def make_layer_hook(idx):
+            def hook(_module, _inp, out):
+                residuals[idx] = out[0] if isinstance(out, tuple) else out
+            return hook
+
+        def norm_pre_hook(_module, args):
+            norm_input["x"] = args[0]
+
+        for i, layer in enumerate(self.layers):
+            handles.append(layer.register_forward_hook(make_layer_hook(i)))
+        handles.append(self.norm.register_forward_pre_hook(norm_pre_hook))
+
+        try:
+            with torch.enable_grad():
+                out = self.model(
+                    inputs_embeds=inputs_embeds,
+                    use_cache=False,
+                    output_hidden_states=False,
+                    return_dict=True,
+                )
+        finally:
+            for h in handles:
+                h.remove()
+
+        return ForwardCache(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            residuals=[r for r in residuals],  # type: ignore
+            final_resid=norm_input["x"],
+            logits=out.logits,
+        )
+
+    def project(self, resid_vec: torch.Tensor) -> torch.Tensor:
+        """Apply final RMSNorm + unembedding: (..., d) -> (..., V) logits."""
+        return self.lm_head(self.norm(resid_vec))

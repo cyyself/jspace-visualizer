@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>J-space · Jacobian-lens visualizer</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#12151d; --panel2:#171b25; --line:#242a38;
+    --ink:#e7ecf5; --dim:#8b94a7; --dimmer:#5b6478;
+    --accent:#6ea8fe; --accent2:#b98cff; --warm:#ffb454; --good:#43d17a; --bad:#ff6b6b;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  a{color:var(--accent)}
+  .wrap{max-width:1400px;margin:0 auto;padding:18px 20px 60px}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:19px;margin:0;font-weight:650;letter-spacing:.2px}
+  h1 .j{color:var(--accent)} h1 .s{color:var(--accent2)}
+  .sub{color:var(--dim);font-size:12.5px}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:14px 0;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+  select,input,button,textarea{font-family:inherit;font-size:13px;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+  textarea{width:100%;resize:vertical;min-height:44px;font-family:var(--mono);font-size:12.5px}
+  button{cursor:pointer;background:var(--panel2);transition:.12s}
+  button:hover{border-color:var(--accent);color:#fff}
+  button.primary{background:linear-gradient(180deg,#2a4d8f,#20365f);border-color:#3a5c9e;color:#fff;font-weight:600}
+  button.primary:hover{filter:brightness(1.15)}
+  button:disabled{opacity:.5;cursor:default}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{border:0;border-radius:0;background:transparent;padding:7px 12px}
+  .seg button.on{background:var(--accent);color:#08101f;font-weight:600}
+  .tabs{display:flex;gap:4px;margin:6px 0 2px}
+  .tabs button{border-radius:10px 10px 0 0;border-bottom:0;background:transparent;color:var(--dim);padding:9px 16px}
+  .tabs button.on{background:var(--panel);color:var(--ink);border-color:var(--line)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:0 12px 12px 12px;padding:16px}
+  label.f{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--dim)}
+  .stat{color:var(--dim);font-size:12px} .stat b{color:var(--ink);font-weight:600}
+  .hint{color:var(--dim);font-size:12px;margin:8px 0}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* grid */
+  .gridwrap{overflow:auto;margin-top:12px;border:1px solid var(--line);border-radius:10px;max-height:74vh}
+  table.grid{border-collapse:separate;border-spacing:0;font-family:var(--mono);font-size:11px}
+  table.grid th.corner{position:sticky;left:0;top:0;z-index:6;background:var(--panel2)}
+  table.grid thead th{position:sticky;top:0;z-index:4;background:var(--panel2);color:var(--dim);font-weight:500;
+    padding:6px 6px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:center;min-width:60px}
+  table.grid tbody td.lab, table.grid td.lab{position:sticky;left:0;z-index:3;background:var(--panel2);color:var(--dim);
+    padding:2px 8px;text-align:right;white-space:nowrap;border-right:1px solid var(--line);font-size:10px}
+  table.grid td.cell{padding:0;border-bottom:1px solid rgba(255,255,255,.03);border-right:1px solid rgba(255,255,255,.03)}
+  .cell .box{padding:3px 5px;min-width:60px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    cursor:default;color:#dfe6f3}
+  .cell .box:hover{outline:1px solid var(--accent);outline-offset:-1px}
+  .cell .box.pin{outline:2px solid var(--warm);outline-offset:-2px}
+  .ws{color:var(--dim)}   /* whitespace markers */
+  .axis{color:var(--dim);font-size:11px;margin:6px 2px 0}
+
+  .genline{font-family:var(--mono);font-size:13px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;padding:10px 12px;margin-top:10px;min-height:20px;white-space:pre-wrap}
+  .genline .p{color:var(--dim)} .genline .g{color:var(--good)} .genline .cur{color:var(--warm)}
+  .detail{margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--dim);min-height:18px}
+  .detail b{color:var(--ink)}
+  .cmp{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+  .cmp .col{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px;font-family:var(--mono);font-size:12.5px}
+  .cmp .col h4{margin:0 0 6px;font-family:inherit;font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;letter-spacing:.5px}
+  .err{color:var(--bad);font-family:var(--mono);font-size:12px;margin-top:10px}
+  .legend{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dim)}
+  .legend .grad{width:120px;height:10px;border-radius:3px;background:linear-gradient(90deg,#1a2030,#274063,#3f6bbf,#6ea8fe,#a9d0ff)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="j">J</span>-<span class="s">space</span> visualizer</h1>
+    <span class="sub">Jacobian-lens readouts of the residual stream · what each cell points to downstream</span>
+  </header>
+
+  <div class="bar">
+    <label class="f">model
+      <select id="model"></select>
+    </label>
+    <button id="loadBtn">load</button>
+    <span class="stat" id="mstat">no model loaded</span>
+    <span style="flex:1"></span>
+    <div class="f"><span>lens</span>
+      <div class="seg" id="lensSeg">
+        <button data-k="jacobian" class="on">J-lens</button>
+        <button data-k="logit">logit-lens</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabs" id="tabs">
+    <button data-t="slice" class="on">Slice</button>
+    <button data-t="generate">Generate</button>
+    <button data-t="intervene">Intervene</button>
+  </div>
+
+  <!-- SLICE -->
+  <div class="card" id="tab-slice">
+    <textarea id="slicePrompt">The capital of France is</textarea>
+    <div class="bar" style="margin:10px 0 0;background:transparent;border:0;padding:0">
+      <button class="primary" id="sliceBtn">Run slice</button>
+      <label class="f">max layers shown
+        <input id="maxLayers" type="number" min="4" max="80" value="28" style="width:80px"/>
+      </label>
+      <span style="flex:1"></span>
+      <div class="legend"><span>low</span><span class="grad"></span><span>high p</span></div>
+      <span class="stat" id="sliceStat"></span>
+    </div>
+    <div class="axis">rows = layers (deepest at top → output-aligned) · columns = token positions · cell = top readout token</div>
+    <div id="sliceGrid" class="gridwrap" style="display:none"></div>
+    <div class="detail" id="sliceDetail"></div>
+    <div class="err" id="sliceErr"></div>
+  </div>
+
+  <!-- GENERATE -->
+  <div class="card" id="tab-generate" style="display:none">
+    <textarea id="genPrompt">The Eiffel Tower is located in the city of</textarea>
+    <div class="bar" style="margin:10px 0 0;background:transparent;border:0;padding:0">
+      <button class="primary" id="genBtn">Stream generation</button>
+      <button id="genStop" disabled>stop</button>
+      <label class="f">tokens<input id="genMax" type="number" min="1" max="80" value="20" style="width:70px"/></label>
+      <label class="f">temp<input id="genTemp" type="number" min="0" max="2" step="0.1" value="0" style="width:70px"/></label>
+      <span class="stat" id="genStat"></span>
+    </div>
+    <div class="genline" id="genLine"></div>
+    <div class="axis">each new column is a generated token · the "workspace band" is the per-layer readout at that step, forming before the token is emitted</div>
+    <div id="genGrid" class="gridwrap" style="display:none"></div>
+    <div class="detail" id="genDetail"></div>
+    <div class="err" id="genErr"></div>
+  </div>
+
+  <!-- INTERVENE -->
+  <div class="card" id="tab-intervene" style="display:none">
+    <textarea id="intPrompt">My favorite city to visit is</textarea>
+    <div class="bar" style="margin:10px 0 0;background:transparent;border:0;padding:0">
+      <button class="primary" id="intBtn">Steer</button>
+      <label class="f">layer<input id="intLayer" type="number" min="0" value="12" style="width:70px"/></label>
+      <label class="f">toward token<input id="intToken" type="text" value=" Paris" style="width:120px"/></label>
+      <label class="f">strength<input id="intAlpha" type="number" step="0.5" value="8" style="width:70px"/></label>
+      <span class="stat" id="intStat"></span>
+    </div>
+    <div class="hint">Adds a steering vector v = ∂logit(token)/∂h<sub>layer</sub> into the residual stream at that layer, then regenerates. Effects are subtle on small models.</div>
+    <div class="cmp">
+      <div class="col"><h4>baseline</h4><div id="intBase">—</div></div>
+      <div class="col"><h4>steered</h4><div id="intSteer">—</div></div>
+    </div>
+    <div class="err" id="intErr"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let LENS = "jacobian";
+let TAB = "slice";
+let genAbort = null;
+
+// ---- token display helpers ----
+function tokHtml(t){
+  if(t === undefined || t === null) return "";
+  let s = t.replace(/\n/g,"↵").replace(/\t/g,"⇥");
+  s = s.replace(/ /g,"<span class='ws'>·</span>");
+  if(s==="") s = "<span class='ws'>∅</span>";
+  return s;
+}
+function esc(t){return (t||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+// probability -> background color (dark->bright blue)
+function pColor(p){
+  const t = Math.max(0, Math.min(1, Math.sqrt(p))); // gamma for low-prob visibility
+  // interpolate across a small ramp
+  const stops = [[26,32,48],[39,64,99],[63,107,191],[110,168,254],[169,208,255]];
+  const x = t*(stops.length-1), i = Math.floor(x), f = x-i;
+  const a = stops[i], b = stops[Math.min(i+1,stops.length-1)];
+  const c = a.map((v,k)=>Math.round(v+(b[k]-v)*f));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+// ---- generic grid renderer ----
+// payload: {tokens:[], layers:[rowLayerIdx...], cells:[row][col]{token,prob,id}}
+function renderGrid(host, payload, onCell){
+  const {tokens, layers, cells} = payload;
+  let h = "<table class='grid'><thead><tr><th class='corner'>layer\\pos</th>";
+  tokens.forEach((tk,i)=> h += `<th title="pos ${i}: ${esc(JSON.stringify(tk))}">${i}<br>${tokHtml(tk)}</th>`);
+  h += "</tr></thead><tbody>";
+  cells.forEach((row,r)=>{
+    h += `<tr><td class='lab'>L${layers[r]}</td>`;
+    row.forEach((c,ci)=>{
+      const bg = pColor(c.prob||0);
+      const lum = (c.prob||0) > 0.28 ? "#08101f" : "#dfe6f3";
+      h += `<td class='cell'><div class='box' style="background:${bg};color:${lum}"
+        data-r="${r}" data-c="${ci}" title="L${layers[r]} · pos ${ci} · p=${(c.prob||0).toFixed(3)}">${tokHtml(c.token)}</div></td>`;
+    });
+    h += "</tr>";
+  });
+  h += "</tbody></table>";
+  host.innerHTML = h;
+  host.style.display = "block";
+  if(onCell){
+    host.querySelectorAll(".box").forEach(el=>{
+      el.onclick = ()=>{
+        host.querySelectorAll(".box.pin").forEach(x=>x.classList.remove("pin"));
+        el.classList.add("pin");
+        onCell(cells[+el.dataset.r][+el.dataset.c], layers[+el.dataset.r], +el.dataset.c, payload);
+      };
+    });
+  }
+}
+
+// ---- model bar ----
+async function loadModels(){
+  const r = await (await fetch("/api/models")).json();
+  const sel = $("#model"); sel.innerHTML = "";
+  r.models.forEach(m=>{ const o=document.createElement("option"); o.value=m; o.textContent=m; sel.appendChild(o); });
+  if(r.current) sel.value = r.current;
+}
+async function doLoad(){
+  $("#mstat").innerHTML = "<span class='spin'></span> loading…";
+  $("#loadBtn").disabled = true;
+  try{
+    const r = await (await fetch("/api/load",{method:"POST",headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:$("#model").value})})).json();
+    $("#mstat").innerHTML = `<b>${r.n_layers}</b> layers · d=<b>${r.d_model}</b> · vocab <b>${r.vocab.toLocaleString()}</b> · <b>${r.gpu_gb} GB</b> GPU`;
+    $("#maxLayers").value = r.n_layers;
+    $("#intLayer").max = r.n_layers-1;
+  }catch(e){ $("#mstat").textContent = "load failed: "+e; }
+  $("#loadBtn").disabled = false;
+}
+
+// ---- slice ----
+async function runSlice(){
+  $("#sliceErr").textContent=""; $("#sliceDetail").textContent="";
+  $("#sliceStat").innerHTML = "<span class='spin'></span> computing "+(LENS==="jacobian"?"Jacobians":"readouts")+"…";
+  $("#sliceBtn").disabled = true;
+  const t0 = performance.now();
+  try{
+    const r = await fetch("/api/slice",{method:"POST",headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt:$("#slicePrompt").value, kind:LENS,
+        model:$("#model").value, max_layers:+$("#maxLayers").value})});
+    if(!r.ok) throw new Error(await r.text());
+    const g = await r.json();
+    renderGrid($("#sliceGrid"), g, (cell,layer,pos,pl)=>{
+      $("#sliceDetail").innerHTML = `pinned → layer <b>L${layer}</b>, position <b>${pos}</b> ("${esc(pl.tokens[pos])}") reads <b>${esc(cell.token)}</b> at p=<b>${cell.prob.toFixed(3)}</b>`;
+    });
+    $("#sliceStat").textContent = `${g.kind} · ${g.cells.length}×${g.tokens.length} · ${((performance.now()-t0)/1000).toFixed(1)}s`;
+  }catch(e){ $("#sliceErr").textContent = "error: "+e.message; $("#sliceStat").textContent=""; }
+  $("#sliceBtn").disabled = false;
+}
+
+// ---- generate (SSE over fetch stream) ----
+async function runGenerate(){
+  $("#genErr").textContent=""; $("#genDetail").textContent=""; $("#genLine").innerHTML="";
+  $("#genBtn").disabled=true; $("#genStop").disabled=false;
+  const prompt = $("#genPrompt").value;
+  let cols=[], layers=[], promptToks=[];
+  genAbort = new AbortController();
+  try{
+    const resp = await fetch("/api/generate",{method:"POST",headers:{'Content-Type':'application/json'},
+      signal: genAbort.signal,
+      body:JSON.stringify({prompt, kind:LENS, model:$("#model").value,
+        max_new_tokens:+$("#genMax").value, temperature:+$("#genTemp").value,
+        max_layers:+$("#maxLayers").value})});
+    const reader = resp.body.getReader(); const dec = new TextDecoder();
+    let buf="";
+    while(true){
+      const {value,done} = await reader.read(); if(done) break;
+      buf += dec.decode(value,{stream:true});
+      let idx;
+      while((idx = buf.indexOf("\n\n")) >= 0){
+        const chunk = buf.slice(0,idx); buf = buf.slice(idx+2);
+        if(!chunk.startsWith("data:")) continue;
+        const ev = JSON.parse(chunk.slice(5).trim());
+        if(ev.type==="meta"){ layers=ev.layers; promptToks=ev.tokens;
+          $("#genLine").innerHTML = `<span class='p'>${esc(promptToks.join(""))}</span><span class='cur'>▌</span>`;
+        }
+        else if(ev.type==="token"){
+          cols.push(ev);
+          renderBand($("#genGrid"), layers, cols, promptToks);
+          const gen = cols.map(c=>c.token).join("");
+          $("#genLine").innerHTML = `<span class='p'>${esc(promptToks.join(""))}</span><span class='g'>${esc(gen)}</span><span class='cur'>▌</span>`;
+          $("#genStat").textContent = `step ${ev.step+1} · "${ev.token}"`;
+        }
+        else if(ev.type==="error"){ $("#genErr").textContent="error: "+ev.error; }
+        else if(ev.type==="done"){ $("#genLine").innerHTML = $("#genLine").innerHTML.replace("▌",""); }
+      }
+    }
+  }catch(e){ if(e.name!=="AbortError") $("#genErr").textContent="error: "+e.message; }
+  $("#genBtn").disabled=false; $("#genStop").disabled=true; genAbort=null;
+}
+// band grid: rows=layers, columns=generated tokens; each cell top band token
+function renderBand(host, layers, cols, promptToks){
+  let h = "<table class='grid'><thead><tr><th class='corner'>layer\\gen</th>";
+  cols.forEach((c,i)=> h += `<th title="generated token ${i}">${i}<br>${tokHtml(c.token)}</th>`);
+  h += "</tr></thead><tbody>";
+  layers.forEach((L,r)=>{
+    h += `<tr><td class='lab'>L${L}</td>`;
+    cols.forEach((c,ci)=>{
+      const top = c.band[r].top[0];
+      const bg = pColor(top.prob||0);
+      const lum = (top.prob||0) > 0.28 ? "#08101f" : "#dfe6f3";
+      const tt = c.band[r].top.map(x=>`${x.token} ${(x.prob).toFixed(2)}`).join(" · ");
+      h += `<td class='cell'><div class='box' style="background:${bg};color:${lum}" title="L${L}: ${esc(tt)}">${tokHtml(top.token)}</div></td>`;
+    });
+    h += "</tr>";
+  });
+  // final row: emitted token
+  h += `<tr><td class='lab' style='color:var(--good)'>→ out</td>`;
+  cols.forEach(c=> h += `<td class='cell'><div class='box' style="background:#153021;color:var(--good)">${tokHtml(c.token)}</div></td>`);
+  h += "</tr></tbody></table>";
+  host.innerHTML = h; host.style.display="block";
+  host.scrollLeft = host.scrollWidth;
+}
+
+// ---- intervene ----
+async function runIntervene(){
+  $("#intErr").textContent=""; $("#intBase").textContent="…"; $("#intSteer").textContent="…";
+  $("#intBtn").disabled=true; $("#intStat").innerHTML="<span class='spin'></span> steering…";
+  try{
+    const r = await fetch("/api/intervene",{method:"POST",headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt:$("#intPrompt").value, model:$("#model").value,
+        layer:+$("#intLayer").value, token:$("#intToken").value, alpha:+$("#intAlpha").value})});
+    if(!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    $("#intBase").innerHTML = `<span class='ws'>${esc(d.prompt)}</span>${esc(d.baseline)}`;
+    $("#intSteer").innerHTML = `<span class='ws'>${esc(d.prompt)}</span>${esc(d.steered)}`;
+    $("#intStat").textContent = `layer L${d.layer} → "${d.token}" · α=${d.alpha}`;
+  }catch(e){ $("#intErr").textContent="error: "+e.message; $("#intStat").textContent=""; }
+  $("#intBtn").disabled=false;
+}
+
+// ---- wiring ----
+$("#lensSeg").addEventListener("click", e=>{
+  if(e.target.tagName!=="BUTTON") return;
+  LENS = e.target.dataset.k;
+  $("#lensSeg").querySelectorAll("button").forEach(b=>b.classList.toggle("on", b===e.target));
+});
+$("#tabs").addEventListener("click", e=>{
+  if(e.target.tagName!=="BUTTON") return;
+  TAB = e.target.dataset.t;
+  $("#tabs").querySelectorAll("button").forEach(b=>b.classList.toggle("on", b.dataset.t===TAB));
+  ["slice","generate","intervene"].forEach(t=> $("#tab-"+t).style.display = t===TAB?"block":"none");
+});
+$("#loadBtn").onclick = doLoad;
+$("#sliceBtn").onclick = runSlice;
+$("#genBtn").onclick = runGenerate;
+$("#genStop").onclick = ()=>{ if(genAbort) genAbort.abort(); };
+$("#intBtn").onclick = runIntervene;
+
+// deep-link / auto-run: ?tab=slice&prompt=...&lens=jacobian&run=1
+function applyQuery(){
+  const q = new URLSearchParams(location.search);
+  if(q.get("lens")){ LENS=q.get("lens");
+    $("#lensSeg").querySelectorAll("button").forEach(b=>b.classList.toggle("on", b.dataset.k===LENS)); }
+  const tab = q.get("tab");
+  if(tab){ TAB=tab; $("#tabs").querySelectorAll("button").forEach(b=>b.classList.toggle("on", b.dataset.t===TAB));
+    ["slice","generate","intervene"].forEach(t=> $("#tab-"+t).style.display = t===TAB?"block":"none"); }
+  const p = q.get("prompt");
+  if(p){ $("#slicePrompt").value=p; $("#genPrompt").value=p; $("#intPrompt").value=p; }
+  return q.get("run");
+}
+(async ()=>{
+  await loadModels(); await doLoad();
+  const run = applyQuery();
+  if(run==="slice" || (run==="1" && TAB==="slice")) runSlice();
+  else if(run==="generate" || (run==="1" && TAB==="generate")) runGenerate();
+})();
+</script>
+</body>
+</html>
