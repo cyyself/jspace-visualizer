@@ -29,7 +29,23 @@ from dataclasses import dataclass
 
 import torch
 
-from .model import ForwardCache, LensModel, empty_cache
+from .model import (ForwardCache, LensModel, empty_cache, mem_allocated_gb,
+                    mem_total_gb)
+
+# Peak GPU memory of one batched J-lens forward + double-backward, above the
+# resident weights, fitted on a 1.7B model (d=2048, 28 layers):
+#
+#     peak_GB(B, T) ~= A*B*T + Q*B*T^2
+#
+# The linear term is activations/MLP intermediates; the quadratic term is the
+# eager attention scores (B x heads x T x T retained per layer for backward).
+# Fitted against measurements at (B,T) = (9,9) (18,18) (24,36) (24,72) (22,108)
+# (11,216) (5,432). A fixed chunk of 24 OOMs a 24 GB card at ~108 tokens, so we
+# solve for the largest B that fits the free VRAM.
+GB_PER_BATCH_TOKEN = 0.0067        # A
+GB_PER_BATCH_TOKEN_SQ = 5.5e-6     # Q
+MAX_POS_CHUNK = 24
+MEM_UTILIZATION = 0.72             # of total VRAM; OOM backoff covers the rest
 
 
 @dataclass
@@ -54,13 +70,18 @@ def _grid_payload(lm: LensModel, tokens, layers, cells, kind):
 class Lens:
     def __init__(self, lm: LensModel):
         self.lm = lm
+        # Snapshot the resident-weights footprint once. Deriving the chunk size
+        # from *live* allocation would make the grid depend on whatever else is
+        # on the GPU, and bf16 matmuls are batch-size dependent -- so the same
+        # prompt could render different low-confidence cells run to run.
+        self.resident_gb = mem_allocated_gb()
 
     # ------------------------------------------------------------ logit lens
     @torch.no_grad()
     def logit_lens_grid(self, input_ids: torch.Tensor, layers=None):
         lm = self.lm
         tokens = lm.token_strings(input_ids)
-        cache = lm.forward_with_graph(input_ids, batch=1)
+        cache = lm.forward_with_graph(input_ids, batch=1, grad=False)
         if layers is None:
             layers = list(range(lm.n_layers))
         # top row = deepest layer
@@ -77,7 +98,18 @@ class Lens:
         return _grid_payload(lm, tokens, rows, cells, "logit")
 
     # --------------------------------------------------------- jacobian lens
-    def jlens_grid(self, input_ids: torch.Tensor, layers=None, pos_chunk: int = 24):
+    def auto_pos_chunk(self, T: int) -> int:
+        """Largest position-batch whose peak memory fits the VRAM budget.
+
+        Solve  A*B*T + Q*B*T^2 <= headroom  for B. Depends only on (device, model,
+        T), so a given prompt always renders the same grid.
+        """
+        T = max(T, 1)
+        headroom = max(0.5, MEM_UTILIZATION * mem_total_gb() - self.resident_gb)
+        per_row = GB_PER_BATCH_TOKEN * T + GB_PER_BATCH_TOKEN_SQ * T * T
+        return max(1, min(MAX_POS_CHUNK, int(headroom / per_row)))
+
+    def jlens_grid(self, input_ids: torch.Tensor, layers=None, pos_chunk: int | None = None):
         """Full position x layer J-lens grid for a static prompt."""
         lm = self.lm
         tokens = lm.token_strings(input_ids)
@@ -87,12 +119,26 @@ class Lens:
         rows = list(reversed(layers))
         positions = list(range(T))
 
+        chunk_size = pos_chunk or self.auto_pos_chunk(T)
+
         # readout[layer_idx][pos] = (token, prob, id)
         readout = {li: [None] * T for li in rows}
 
-        for start in range(0, T, pos_chunk):
-            chunk = positions[start:start + pos_chunk]
-            self._jlens_chunk(input_ids, rows, chunk, readout)
+        start = 0
+        while start < T:
+            chunk = positions[start:start + chunk_size]
+            try:
+                self._jlens_chunk(input_ids, rows, chunk, readout)
+            except torch.OutOfMemoryError:
+                empty_cache()
+                if chunk_size == 1:
+                    raise torch.OutOfMemoryError(
+                        f"out of memory on a single position at T={T}; "
+                        f"try a shorter prompt or the logit lens"
+                    ) from None
+                chunk_size = max(1, chunk_size // 2)
+                continue          # retry this same start with a smaller chunk
+            start += len(chunk)
 
         cells = []
         for li in rows:
@@ -182,8 +228,9 @@ class Lens:
         lm = self.lm
         ids = input_ids
         eos = lm.tokenizer.eos_token_id
+        need_grad = (kind != "logit")
         for step in range(max_new_tokens):
-            cache = lm.forward_with_graph(ids, batch=1)
+            cache = lm.forward_with_graph(ids, batch=1, grad=need_grad)
             pos = ids.shape[1] - 1
             band = self.band_at(cache, pos, kind, topk_band, layers)
             logits = cache.logits[0, -1].float()

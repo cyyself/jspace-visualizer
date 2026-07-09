@@ -62,6 +62,12 @@ def mem_allocated_gb() -> float:
     return 0.0
 
 
+def mem_total_gb() -> float:
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_properties(0).total_memory / 1e9
+    return 8.0  # conservative guess for CPU boxes
+
+
 def default_dtype(device: str) -> torch.dtype:
     # bf16 on accelerators; fp32 on CPU (bf16 CPU matmul is slow/patchy)
     return torch.float32 if device == "cpu" else torch.bfloat16
@@ -187,7 +193,8 @@ class LensModel:
         return out
 
     # --------------------------------------------------------------- forward
-    def forward_with_graph(self, input_ids: torch.Tensor, batch: int = 1) -> ForwardCache:
+    def forward_with_graph(self, input_ids: torch.Tensor, batch: int = 1,
+                           grad: bool = True) -> ForwardCache:
         """Run a forward pass that keeps every layer's residual output in the
         autograd graph. ``batch`` replicates the sequence so we can inject a
         different tangent per position in one shot.
@@ -195,11 +202,16 @@ class LensModel:
         Uses forward hooks (version-robust) to grab: (1) each decoder layer's
         output residual, (2) the input to the final norm (the pre-norm final
         residual we differentiate through).
+
+        ``grad=False`` skips graph construction entirely -- the logit lens only
+        reads the residuals, so it has no reason to pay for a graph.
         """
         if batch > 1:
             input_ids = input_ids.expand(batch, -1).contiguous()
 
-        inputs_embeds = self.embed(input_ids).detach().clone().requires_grad_(True)
+        inputs_embeds = self.embed(input_ids).detach().clone()
+        if grad:
+            inputs_embeds.requires_grad_(True)
 
         residuals: list[Optional[torch.Tensor]] = [None] * self.n_layers
         norm_input: dict[str, torch.Tensor] = {}
@@ -219,7 +231,7 @@ class LensModel:
         handles.append(self.norm.register_forward_pre_hook(norm_pre_hook))
 
         try:
-            with torch.enable_grad():
+            with (torch.enable_grad() if grad else torch.no_grad()):
                 out = self.model(
                     inputs_embeds=inputs_embeds,
                     use_cache=False,

@@ -126,10 +126,19 @@ async def slice_grid(req: Request):
     lm = lens.lm
     ids = lm.tokenize(prompt)
     layers = _subset_layers(lm.n_layers, body.get("max_layers"))
-    if kind == "logit":
-        grid = lens.logit_lens_grid(ids, layers=layers)
-    else:
-        grid = lens.jlens_grid(ids, layers=layers)
+    try:
+        if kind == "logit":
+            grid = lens.logit_lens_grid(ids, layers=layers)
+        else:
+            # pos_chunk is exposed because bf16 matmuls are batch-size dependent:
+            # pinning it makes a grid bit-for-bit reproducible across machines.
+            grid = lens.jlens_grid(ids, layers=layers,
+                                   pos_chunk=body.get("pos_chunk"))
+    except torch.OutOfMemoryError as e:
+        empty_cache()
+        return JSONResponse(
+            {"error": f"out of GPU memory for a {ids.shape[1]}-token prompt: {e}"},
+            status_code=507)
     return JSONResponse(grid)
 
 

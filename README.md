@@ -163,14 +163,44 @@ cells occasionally differ (near-ties flipping under different bf16 kernels and
 reduction orders), and greedy generation can diverge a few tokens in for the
 same reason.
 
+## Memory & reproducibility
+
+A J-lens slice runs one batched forward (one sequence per position) and keeps
+its graph alive across all layers, so peak memory above the resident weights is
+
+```
+peak_GB(B, T) ~= 0.0067*B*T + 5.5e-6*B*T^2
+```
+
+(linear term = activations, quadratic = eager attention scores retained for
+backward). `Lens.auto_pos_chunk()` solves this for the largest position-batch
+that fits `MEM_UTILIZATION` of VRAM, with an OOM-backoff that halves the chunk
+and retries. Before this, a fixed chunk of 24 OOM'd a 24 GB card at ~108 tokens;
+now a 432-token prompt peaks at 15.8 GB. There is **no leak** — memory returns
+to the resident 3.46 GB after every request (`scripts/mem_test.py` checks all of
+this).
+
+Long prompts get slow, not fatal: the chunk shrinks, so wall time grows roughly
+as `T^2` (432 tokens ≈ 10 min for a full 28-layer grid). Cut `max_layers`, or
+use the logit lens, which needs no graph at all.
+
+**Reproducibility.** bf16 matmuls are batch-size dependent (split-k reduction
+order), so changing `pos_chunk` perturbs readout logits by ~1e-2 relative
+(cosine similarity 0.9995). That flips the argmax *only* where the top-2 are
+near-tied: 9% of cells, median p=0.09, and **no cell with p>0.40 ever
+disagrees**. `auto_pos_chunk` therefore depends only on (device, model, T) — not
+on live allocation — so a given prompt always renders the same grid. Pass
+`pos_chunk` explicitly to `/api/slice` to pin it across machines. The same
+effect makes low-confidence cells differ between CUDA and ROCm.
+
 ## Notes & limitations
 
 - The bottom J-lens row (deepest layer, where `J = I`) equals the model's actual
   next-token prediction — a built-in sanity check.
 - Base models emit junk filler tokens (`____`) as low-confidence readouts; that's
   the model, not the lens.
-- A slice is a few seconds; the live band is ~1–2 s/token (one Jacobian per layer).
-  Switch to **logit-lens** for instant readouts.
+- A short slice is a few seconds; the live band is ~1–2 s/token (one Jacobian per
+  layer). Switch to **logit-lens** for instant readouts.
 - Interventions are subtle on small models with a single-context steering vector.
 
 Credit: concept & UI inspiration from
