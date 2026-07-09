@@ -62,14 +62,23 @@ loaded with `attn_implementation="eager"`.
 
 ## Requirements
 
-- NVIDIA GPU (built/tested on an RTX 3090, 24 GB; the default 1.7B model uses < 4 GB).
-- The Python env is created with `uv` (already used for setup).
+An NVIDIA GPU, an AMD GPU (ROCm), or CPU. The backend is auto-detected — ROCm
+masquerades as `torch.cuda`, so the same code path drives both vendors. The
+default 1.7B model needs < 4 GB. The Python env is created with `uv`.
+
+Tested on:
+
+| box | backend | device | torch |
+|---|---|---|---|
+| RTX 3090 (24 GB) | CUDA 12.4 | NVIDIA GeForce RTX 3090 | 2.6.0+cu124 |
+| Strix Halo (Ryzen AI Max+ 395) | ROCm 7.2 | AMD Radeon 8060S, gfx1151 | 2.13.0+rocm7.2 |
 
 ## Run
 
 ```bash
-./run.sh              # -> http://127.0.0.1:8765   (default port 8765)
-./run.sh 9000         # custom port
+./run.sh                # -> http://127.0.0.1:8765   (default port 8765)
+./run.sh 9000           # custom port
+HOST=0.0.0.0 ./run.sh   # listen on all interfaces (LAN-visible)
 ```
 
 Then open the URL. Pick a model, hit **Run slice** or **Stream generation**.
@@ -107,6 +116,52 @@ scripts/
   smoke_test.py   # validates the mechanism (residual capture, readouts, invariants)
 run.sh
 ```
+
+## Running on AMD (ROCm / Strix Halo)
+
+Everything works, including the double-backward JVP the J-lens depends on
+(`scripts/rocm_probe.py` checks it against finite differences: rel err ~1.7e-4,
+matching CUDA's ~1.9e-4). Setup:
+
+```bash
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+uv pip install -r requirements-rocm.txt     # match the index to your ROCm version
+python scripts/rocm_probe.py                # verify bf16, eager attn, double-backward
+```
+
+![slice grid on ROCm](docs/slice-rocm.png)
+
+Two Strix Halo specifics:
+
+**1. Expose unified memory to the GPU.** The BIOS VRAM carveout is often only
+2 GB; the rest of system RAM reaches the GPU via GTT. With these kernel params
+torch reports the full 126.7 GB rather than 2 GB:
+
+```
+amdgpu.gttsize=114688 ttm.pages_limit=30932992 ttm.page_pool_size=30932992
+```
+
+**2. Never copy weights straight from the mmap'd safetensors file.**
+`from_pretrained` returns parameters aliasing the mmap. A host→device copy from
+those file-backed pages runs at **0.021 GB/s** on ROCm, versus **15.5 GB/s** once
+the tensor is cloned into ordinary memory — loading a 1.7B model took **388 s**.
+Neither `low_cpu_mem_usage=False` nor `device_map="cuda"` avoids it (both still
+copy per-tensor from the mmap). `model.move_to_device_fast()` clones each tensor
+into anonymous RAM first, memoizing on parameter identity so tied weights stay
+tied: **388 s → 0.5 s**.
+
+Rough timings (Qwen3-1.7B-Base, `"The capital of France is"`, 28 layers × 5 pos):
+
+| | model load | logit-lens grid | J-lens grid |
+|---|---|---|---|
+| RTX 3090 (CUDA) | 3.7 s | 0.09 s | 2.05 s |
+| Radeon 8060S (ROCm) | 0.5 s | 0.25 s | 1.75 s |
+
+High-confidence readouts are identical across the two backends. Low-probability
+cells occasionally differ (near-ties flipping under different bf16 kernels and
+reduction orders), and greedy generation can diverge a few tokens in for the
+same reason.
 
 ## Notes & limitations
 

@@ -1,0 +1,11 @@
+# AMD ROCm (tested: ROCm 7.2.4, gfx1151 / Strix Halo, torch 2.13.0+rocm7.2)
+# Match the index to your installed ROCm: cat /opt/rocm/.info/version
+--extra-index-url https://download.pytorch.org/whl/rocm7.2
+torch
+transformers>=5.0
+accelerate
+safetensors
+numpy
+fastapi
+uvicorn[standard]
+sse-starlette

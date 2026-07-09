@@ -67,6 +67,48 @@ def default_dtype(device: str) -> torch.dtype:
     return torch.float32 if device == "cpu" else torch.bfloat16
 
 
+def move_to_device_fast(model: torch.nn.Module, device: str) -> torch.nn.Module:
+    """Move a CPU model onto `device`, cloning each tensor into anonymous RAM first.
+
+    `from_pretrained` hands back parameters that alias the mmap'd safetensors
+    file. On ROCm a host->device copy straight from those file-backed pages runs
+    at ~0.02 GB/s, versus ~15 GB/s once the tensor is cloned into ordinary
+    memory -- a 1.7B model takes 388s vs <2s. (On CUDA the mmap path is fine;
+    the extra CPU memcpy is cheap, so we take the same route everywhere.)
+
+    Parameters are memoized on object identity so tied weights (e.g. Qwen3's
+    lm_head <- embed_tokens) remain the *same* Parameter after the move.
+    """
+    if device == "cpu":
+        return model
+
+    seen_params: dict[int, torch.nn.Parameter] = {}
+    seen_buffers: dict[int, torch.Tensor] = {}
+
+    for mod in model.modules():
+        for name, p in list(mod._parameters.items()):
+            if p is None:
+                continue
+            new = seen_params.get(id(p))
+            if new is None:
+                new = torch.nn.Parameter(p.data.detach().clone().to(device),
+                                         requires_grad=p.requires_grad)
+                seen_params[id(p)] = new
+            mod._parameters[name] = new
+        for name, b in list(mod._buffers.items()):
+            if b is None:
+                continue
+            new_b = seen_buffers.get(id(b))
+            if new_b is None:
+                new_b = b.detach().clone().to(device)
+                seen_buffers[id(b)] = new_b
+            mod._buffers[name] = new_b
+
+    if hasattr(model, "tie_weights"):
+        model.tie_weights()
+    return model
+
+
 def resolve_local_model(model_id: str) -> str:
     """Turn 'Qwen/Qwen3-1.7B-Base' into the local snapshot dir if it is cached,
     otherwise return the id unchanged (letting HF download / resolve it)."""
@@ -103,10 +145,11 @@ class LensModel:
         self.tokenizer = AutoTokenizer.from_pretrained(local)
         # 'eager' attention is plain matmul+softmax, which (unlike SDPA/flash)
         # supports the double-backward we use to form Jacobian-vector products.
-        self.model = AutoModelForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             local, dtype=dtype, low_cpu_mem_usage=True,
             attn_implementation="eager",
-        ).to(device).eval()
+        )
+        self.model = move_to_device_fast(model, device).eval()
         # We never need gradients w.r.t. weights; only w.r.t. activations.
         for p in self.model.parameters():
             p.requires_grad_(False)
