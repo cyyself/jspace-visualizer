@@ -23,6 +23,50 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 HF_HUB = os.path.expanduser("~/.cache/huggingface/hub")
 
 
+# --------------------------------------------------------------- device utils
+# NOTE: ROCm/HIP masquerades as `torch.cuda`, so an AMD GPU (e.g. Strix Halo
+# gfx1151) is driven through exactly the same API as an NVIDIA one.
+
+def pick_device(prefer: str | None = None) -> str:
+    if prefer and prefer != "auto":
+        return prefer
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def backend_name() -> str:
+    if torch.cuda.is_available():
+        return "rocm" if getattr(torch.version, "hip", None) else "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def device_label() -> str:
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_name(0)
+    return "cpu"
+
+
+def empty_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def mem_allocated_gb() -> float:
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1e9
+    return 0.0
+
+
+def default_dtype(device: str) -> torch.dtype:
+    # bf16 on accelerators; fp32 on CPU (bf16 CPU matmul is slow/patchy)
+    return torch.float32 if device == "cpu" else torch.bfloat16
+
+
 def resolve_local_model(model_id: str) -> str:
     """Turn 'Qwen/Qwen3-1.7B-Base' into the local snapshot dir if it is cached,
     otherwise return the id unchanged (letting HF download / resolve it)."""
@@ -50,14 +94,17 @@ class ForwardCache:
 
 
 class LensModel:
-    def __init__(self, model_id: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16):
+    def __init__(self, model_id: str, device: str | None = None,
+                 dtype: torch.dtype | None = None):
         self.model_id = model_id
+        device = pick_device(device)
+        dtype = dtype or default_dtype(device)
         local = resolve_local_model(model_id)
         self.tokenizer = AutoTokenizer.from_pretrained(local)
         # 'eager' attention is plain matmul+softmax, which (unlike SDPA/flash)
         # supports the double-backward we use to form Jacobian-vector products.
         self.model = AutoModelForCausalLM.from_pretrained(
-            local, torch_dtype=dtype, low_cpu_mem_usage=True,
+            local, dtype=dtype, low_cpu_mem_usage=True,
             attn_implementation="eager",
         ).to(device).eval()
         # We never need gradients w.r.t. weights; only w.r.t. activations.

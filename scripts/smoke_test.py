@@ -2,17 +2,18 @@
 import sys, time
 import torch
 sys.path.insert(0, "/home/cyy/jspace-visualizer")
-from jspace.model import LensModel
+from jspace.model import LensModel, backend_name, device_label, mem_allocated_gb
 from jspace.lens import Lens
 
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "Qwen/Qwen3-1.7B-Base"
 PROMPT = "The capital of France is"
 
+print(f"backend={backend_name()} device={device_label()} torch={torch.__version__} hip={torch.version.hip}", flush=True)
 print(f"loading {MODEL} ...", flush=True)
 t0 = time.time()
 lm = LensModel(MODEL)
 print(f"  loaded in {time.time()-t0:.1f}s | layers={lm.n_layers} d={lm.d_model} V={lm.vocab_size}", flush=True)
-print(f"  gpu mem: {torch.cuda.memory_allocated()/1e9:.1f} GB", flush=True)
+print(f"  gpu mem: {mem_allocated_gb():.1f} GB", flush=True)
 
 ids = lm.tokenize(PROMPT)
 print("tokens:", lm.token_strings(ids), flush=True)
@@ -46,5 +47,6 @@ print("  last-column readout (deepest->shallow):",
 bottom = jg["cells"][0][-1]["token"]
 model_top = nxt[0][0]
 print(f"[check] deepest J-lens last-col = {bottom!r}  vs model top = {model_top!r}", flush=True)
-print(f"  peak gpu mem: {torch.cuda.max_memory_allocated()/1e9:.1f} GB", flush=True)
+peak = torch.cuda.max_memory_allocated()/1e9 if torch.cuda.is_available() else 0.0
+print(f"  peak gpu mem: {peak:.1f} GB", flush=True)
 print("OK", flush=True)

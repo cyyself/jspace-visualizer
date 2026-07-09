@@ -223,7 +223,7 @@ async function doLoad(){
   try{
     const r = await (await fetch("/api/load",{method:"POST",headers:{'Content-Type':'application/json'},
       body:JSON.stringify({model:$("#model").value})})).json();
-    $("#mstat").innerHTML = `<b>${r.n_layers}</b> layers · d=<b>${r.d_model}</b> · vocab <b>${r.vocab.toLocaleString()}</b> · <b>${r.gpu_gb} GB</b> GPU`;
+    $("#mstat").innerHTML = `<b>${r.n_layers}</b> layers · d=<b>${r.d_model}</b> · vocab <b>${r.vocab.toLocaleString()}</b> · <b>${r.gpu_gb} GB</b> · <b>${(r.backend||"?").toUpperCase()}</b> <span title="${r.device||""}">${(r.device||"").slice(0,28)}</span>`;
     $("#maxLayers").value = r.n_layers;
     $("#intLayer").max = r.n_layers-1;
   }catch(e){ $("#mstat").textContent = "load failed: "+e; }

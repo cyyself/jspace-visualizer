@@ -20,7 +20,7 @@ import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from .model import HF_HUB, LensModel
+from .model import HF_HUB, LensModel, backend_name, device_label, empty_cache, mem_allocated_gb
 from .lens import Lens
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,7 +81,7 @@ def get_lens(model_id: str | None = None) -> Lens:
             if _state["lm"] is not None:
                 del _state["lm"], _state["lens"]
                 _state["lm"] = _state["lens"] = None
-                torch.cuda.empty_cache()
+                empty_cache()
             lm = LensModel(target)
             _state.update(lm=lm, lens=Lens(lm), model_id=target)
         return _state["lens"]
@@ -105,7 +105,8 @@ async def load(req: Request):
     lm = lens.lm
     return {"model": _state["model_id"], "n_layers": lm.n_layers,
             "d_model": lm.d_model, "vocab": lm.vocab_size,
-            "gpu_gb": round(torch.cuda.memory_allocated() / 1e9, 2)}
+            "gpu_gb": round(mem_allocated_gb(), 2),
+            "backend": backend_name(), "device": device_label()}
 
 
 def _subset_layers(n_layers: int, max_layers: int | None):

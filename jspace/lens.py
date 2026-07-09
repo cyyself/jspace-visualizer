@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .model import ForwardCache, LensModel
+from .model import ForwardCache, LensModel, empty_cache
 
 
 @dataclass
@@ -133,7 +133,7 @@ class Lens:
                 readout[li][p] = (tok, prob, tid)
             del u, g, jvp, r, logits, tangent
         del cache
-        torch.cuda.empty_cache()
+        empty_cache()
 
     # ---------------------------------------- shared single-position readout
     def _readout_logits_at(self, cache: ForwardCache, pos: int, rows, kind: str):
@@ -198,7 +198,7 @@ class Lens:
                    "band": band, "next_top": next_top}
             ids = torch.cat([ids, torch.tensor([[nxt]], device=lm.device)], dim=1)
             del cache
-            torch.cuda.empty_cache()
+            empty_cache()
             if eos is not None and nxt == eos:
                 break
 
